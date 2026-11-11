@@ -11,7 +11,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationVisualStyles>true</ApplicationVisualStyles>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <ApplicationIcon>icon\app.ico</ApplicationIcon>
 
     <!-- `dotnet publish -c Release -o dist` 한 번으로 .NET 런타임까지 들어 있는 exe 하나만 나오게 한다 -->
