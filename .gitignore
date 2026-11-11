@@ -4,3 +4,5 @@ dist/
 .vs/
 *.user
 icon/preview-*.png
+icon/*
+!icon/app.ico

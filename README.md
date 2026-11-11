@@ -16,16 +16,17 @@
 ## 요구 사항
 
 - Windows 10/11
-- [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (빌드하려면 .NET 8 SDK)
+- 실행: 추가 설치 없음 (exe 하나에 .NET 런타임 포함, x64)
+- 빌드: .NET 8 SDK
 - Claude Code CLI (`claude`가 PATH에 있어야 함), 구독 계정으로 로그인
 
 ## 빌드
 
 ```
-dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o dist
+dotnet publish -c Release -o dist
 ```
 
-`dist\ClaudeRcManager.exe`가 만들어집니다.
+`dist\ClaudeRcManager.exe` 하나만 만들어지며(약 63MB), 이 파일만 복사해서 실행하면 됩니다.
 
 ## 사용
 
@@ -43,7 +44,3 @@ X 버튼은 트레이로 숨기기만 합니다. 완전히 끄려면 트레이 �
 - 설정: `%APPDATA%\ClaudeRcManager\config.json`
 - 로그: `%APPDATA%\ClaudeRcManager\logs\`
 - 환경 변수 `CLAUDE_RC_MANAGER_HOME`으로 위치를 바꿀 수 있습니다.
-
-## 아이콘
-
-`icon\make-icon.ps1`이 `icon\claude-color.svg` 위에 "RC" 글자를 얹어 `icon\app.ico`를 만듭니다.
