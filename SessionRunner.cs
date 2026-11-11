@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 
 namespace ClaudeRcManager;
 
-enum RunState { Stopped, Starting, Connected, Waiting, Exited, External }
+enum RunState { Stopped, Starting, Connected, Stopping, Waiting, Exited, External }
 
 /// <summary>`claude remote-control` 프로세스 하나를 창 없이 띄우고, 감시하고, 죽으면 다시 살린다.</summary>
 sealed class SessionRunner
@@ -19,6 +19,11 @@ sealed class SessionRunner
     bool _stopRequested;
     CancellationTokenSource? _restartCts;
     int _failures;
+    TaskCompletionSource _exited = new();
+    Task? _stopTask;
+
+    /// <summary>Ctrl+C 를 보낸 뒤 claude 가 세션 목록을 저장하고 스스로 끝나기를 기다리는 시간.</summary>
+    const int GracefulStopMs = 20000;
 
     // 화면이 1초마다 다시 그려지므로, 직전 프레임에 있던 줄은 로그에 다시 쓰지 않는다.
     HashSet<string> _prevFrame = new();
@@ -57,6 +62,7 @@ sealed class SessionRunner
                 {
                     RunState.Starting => "연결 중…",
                     RunState.Connected => Capacity.Length > 0 ? $"연결됨 · 세션 {Capacity}" : "연결됨",
+                    RunState.Stopping => "종료 중… (세션 목록 저장)",
                     RunState.Waiting => $"재시작 대기 ({Math.Max(0, (int)Math.Ceiling(((RetryAt ?? DateTime.Now) - DateTime.Now).TotalSeconds))}초)"
                                         + (LastError.Length > 0 ? " · " + LastError : ""),
                     RunState.Exited => LastError.Length > 0 ? "실패 · " + LastError : $"종료됨 (코드 {ExitCode})",
@@ -82,7 +88,9 @@ sealed class SessionRunner
                 RotateLog();
                 var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
                 p.Exited += (_, _) => OnExited(p);
-                p.Start();
+                lock (ConsoleCtrl.Gate) p.Start();   // Ctrl+C 무시 상태를 상속받지 않도록
+                _exited = new TaskCompletionSource();
+                _stopTask = null;
                 _job.Add(p);
                 _proc = p;
                 Pid = p.Id;
@@ -110,8 +118,15 @@ sealed class SessionRunner
         Changed?.Invoke();
     }
 
-    public void Stop()
+    public void Stop() => _ = StopAsync();
+
+    /// <summary>
+    /// 세션을 중지한다. Ctrl+C 로 정상 종료시켜 claude 가 "연결돼 있던 세션 전체"를 기록하게 하고
+    /// (그래야 다음 시작 때 전부 다시 붙는다), 시간 안에 안 끝날 때만 강제 종료한다.
+    /// </summary>
+    public Task StopAsync()
     {
+        Task task;
         lock (_lock)
         {
             _stopRequested = true;
@@ -119,17 +134,41 @@ sealed class SessionRunner
             _restartCts = null;
             RetryAt = null;
             _failures = 0;
-            if (_proc != null)
-            {
-                Log("=== 중지 요청");
-                try { _proc.Kill(entireProcessTree: true); } catch { }
-            }
-            else
+            if (_proc == null)
             {
                 State = RunState.Stopped;
                 LastError = "";
+                task = Task.CompletedTask;
+            }
+            else if (_stopTask != null)
+            {
+                task = _stopTask;   // 이미 종료 중
+            }
+            else
+            {
+                var p = _proc;
+                var exited = _exited.Task;
+                int pid = Pid ?? 0;
+                State = RunState.Stopping;
+                Log("=== 중지 요청 (Ctrl+C)");
+                task = _stopTask = Task.Run(() =>
+                {
+                    bool sent = false;
+                    try { sent = pid > 0 && ConsoleCtrl.SendCtrlC(pid); } catch { }
+                    if (sent && exited.Wait(GracefulStopMs)) return;
+                    Log(sent ? "=== 정상 종료가 시간 안에 끝나지 않아 강제 종료" : "=== Ctrl+C 전달 실패, 강제 종료");
+                    try { p.Kill(entireProcessTree: true); } catch { }
+                    exited.Wait(5000);
+                });
             }
         }
+        Changed?.Invoke();
+        return task;
+    }
+
+    public void MarkTakingOver()
+    {
+        lock (_lock) { if (_proc == null) { State = RunState.Stopping; LastError = ""; } }
         Changed?.Invoke();
     }
 
@@ -148,6 +187,7 @@ sealed class SessionRunner
             var ran = DateTime.Now - (StartedAt ?? DateTime.Now);
             try { p.Dispose(); } catch { }
             _proc = null;
+            _exited.TrySetResult();
             Pid = null;
             Capacity = "";
             Log($"=== 종료 (코드 {ExitCode}, 실행 시간 {ran:d\\.hh\\:mm\\:ss})");
@@ -284,7 +324,7 @@ sealed class SessionRunner
             {
                 if (_curFrame.Add(text) && !_prevFrame.Contains(text)) toLog = text;
 
-                if (_proc != null)
+                if (_proc != null && State is RunState.Starting or RunState.Connected)
                 {
                     if (text.Contains("Connecting", StringComparison.OrdinalIgnoreCase))
                     {

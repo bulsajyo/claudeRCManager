@@ -349,7 +349,7 @@ sealed class MainForm : Form
     /// 세션을 시작한다. 같은 폴더에서 터미널 등으로 이미 rc 가 돌고 있으면 중복 실행하지 않고,
     /// interactive 일 때는 그쪽을 끄고 넘겨받을지 물어본다.
     /// </summary>
-    void StartSessions(List<SessionRunner> targets, bool interactive)
+    async void StartSessions(List<SessionRunner> targets, bool interactive)
     {
         if (_loggedIn == false)
         {
@@ -381,13 +381,10 @@ sealed class MainForm : Form
             foreach (var (r, pid) in external)
             {
                 if (!takeOver) { r.MarkExternal(); continue; }
-                try
-                {
-                    using var p = Process.GetProcessById(pid);
-                    p.Kill(entireProcessTree: true);
-                    p.WaitForExit(5000);
-                }
-                catch { }
+                // 터미널에서 Ctrl+C 를 누른 것처럼 끝내야 그쪽에 붙어 있던 세션들이 전부 넘어온다.
+                r.MarkTakingOver();
+                await Task.Run(() => ConsoleCtrl.StopGracefully(pid, 20000));
+                if (IsDisposed || _reallyExit) return;
                 toStart.Add(r);
             }
         }
@@ -395,14 +392,13 @@ sealed class MainForm : Form
         foreach (var r in toStart) r.Start();
     }
 
-    void RestartSelected()
+    async void RestartSelected()
     {
         var sel = SelectedRunners();
-        foreach (var r in sel) r.Stop();
-        // 종료가 반영될 시간을 잠깐 준 뒤 다시 시작
-        var t = new System.Windows.Forms.Timer { Interval = 1500 };
-        t.Tick += (_, _) => { t.Dispose(); StartSessions(sel, true); };
-        t.Start();
+        // 정상 종료(세션 목록 저장)가 끝난 뒤에 다시 시작해야 세션들이 전부 다시 붙는다.
+        await Task.WhenAll(sel.Select(r => r.StopAsync()));
+        if (IsDisposed || _reallyExit) return;
+        StartSessions(sel, true);
     }
 
     void AddNew()
@@ -553,8 +549,24 @@ sealed class MainForm : Form
             }
             return;
         }
+        // Windows 종료/재부팅 때도 세션 목록을 저장할 시간을 벌기 위해, 끝날 때까지 종료를 잠깐 붙잡아 둔다.
+        bool osShutdown = e.CloseReason == CloseReason.WindowsShutDown;
+        if (osShutdown) { try { ShutdownBlockReasonCreate(Handle, "Claude rc 세션 목록을 저장하는 중"); } catch { } }
         Shutdown();
+        if (osShutdown) { try { ShutdownBlockReasonDestroy(Handle); } catch { } }
         base.OnFormClosing(e);
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string reason);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
+
+    /// <summary>다른 인스턴스가 `--exit` 로 요청했을 때: 묻지 않고 세션을 정상 종료한 뒤 끝낸다.</summary>
+    public void ExitNow()
+    {
+        _reallyExit = true;
+        Close();
     }
 
     void ExitApp()
@@ -570,7 +582,8 @@ sealed class MainForm : Form
     void Shutdown()
     {
         _timer.Stop();
-        foreach (var r in _runners) r.Stop();
+        // 모든 세션에 Ctrl+C 를 보내고, 각자 세션 목록을 저장하고 끝날 때까지 기다린다 (안 끝나면 강제 종료됨).
+        try { Task.WaitAll(_runners.Select(r => r.StopAsync()).ToArray(), 30000); } catch { }
         _tray.Visible = false;
         _tray.Dispose();
         _job.Dispose();   // 남은 자식 프로세스가 있으면 여기서 함께 정리된다
